@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+data/raw/*.csv
+data/processed/*.duckdb
+data/processed/*.duckdb.tmp/
+data/processed/duckdb_tmp/
+.DS_Store
+.env
+*.log
