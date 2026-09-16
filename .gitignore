@@ -5,6 +5,8 @@ data/raw/*.csv
 data/processed/*.duckdb
 data/processed/*.duckdb.tmp/
 data/processed/duckdb_tmp/
+data/cloud/*.duckdb.tmp/
+data/cloud/duckdb_tmp/
 .DS_Store
 .env
 *.log
