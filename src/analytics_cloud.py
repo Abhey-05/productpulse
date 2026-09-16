@@ -104,10 +104,18 @@ def get_dimension_funnel(con: duckdb.DuckDBPyConnection, dimension: str, value: 
     if row is None:
         return {"viewing_sessions": 0}
     viewing_sessions, v2c, c2p, overall = row
+    # cart_to_purchase_pct comes straight from the stored rate rather than
+    # purchase_sessions / cart_sessions below: some sessions purchase a
+    # product without ever carting it first (purchased_without_cart — see
+    # README §7/§16), so overall_conversion_rate's numerator isn't a subset
+    # of view_to_cart_rate's numerator, and dividing the two independently
+    # reconstructed counts silently gives the wrong rate.
     return {
         "viewing_sessions": viewing_sessions,
         "view_to_cart_pct": None if v2c is None else v2c * 100,
+        "cart_to_purchase_pct": None if c2p is None else c2p * 100,
         "overall_conversion_pct": None if overall is None else overall * 100,
+        # Stage sizes for the funnel chart visualization only.
         "cart_sessions": None if v2c is None else round(viewing_sessions * v2c),
         "purchase_sessions": None if overall is None else round(viewing_sessions * overall),
     }

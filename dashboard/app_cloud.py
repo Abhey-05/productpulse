@@ -98,6 +98,19 @@ with st.sidebar:
     )
 
 
+def fmt_compact(n) -> str:
+    """Display-only compact formatting for large numbers in st.metric cards
+    (e.g. 104331840 -> "104.3M") — never changes the underlying value used
+    in any query or calculation, purely how it's rendered here."""
+    if n is None:
+        return "—"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}K"
+    return f"{n:,.0f}"
+
+
 def callout(label: str, title: str, body_html: str, tone: str = "default"):
     st.markdown(
         f"""<div class="pp-callout {tone}">
@@ -119,19 +132,20 @@ def page_overview():
                f"{kpis['total_sessions']:,} sessions")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Users", f"{kpis['total_users']:,}")
-    c2.metric("Total Sessions", f"{kpis['total_sessions']:,}")
-    c3.metric("Product Views", f"{kpis['total_views']:,}")
-    c4.metric("Cart Additions", f"{kpis['total_carts']:,}")
+    c1.metric("Total Users", fmt_compact(kpis['total_users']), help=f"{kpis['total_users']:,}")
+    c2.metric("Total Sessions", fmt_compact(kpis['total_sessions']), help=f"{kpis['total_sessions']:,}")
+    c3.metric("Product Views", fmt_compact(kpis['total_views']), help=f"{kpis['total_views']:,}")
+    c4.metric("Cart Additions", fmt_compact(kpis['total_carts']), help=f"{kpis['total_carts']:,}")
 
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Purchases", f"{kpis['total_purchases']:,}")
+    c5.metric("Purchases", fmt_compact(kpis['total_purchases']), help=f"{kpis['total_purchases']:,}")
     c6.metric("Purchase Conversion", f"{kpis['session_overall_conversion_pct']:.2f}%",
               help="Purchasing sessions / viewing sessions (session-level macro funnel)")
     c7.metric("Cart Abandonment", f"{kpis['cart_abandonment_pct']:.1f}%",
               help="Carted a product, never purchased it (session-product level)")
-    c8.metric("Revenue (proxy)", f"${kpis['total_revenue']:,.0f}",
-              help="SUM(price) over purchase events — a line-item proxy, not a true order total (no quantity field exists)")
+    c8.metric("Revenue (proxy)", f"${fmt_compact(kpis['total_revenue'])}",
+              help=f"${kpis['total_revenue']:,.0f} — SUM(price) over purchase events, a line-item proxy, "
+                   f"not a true order total (no quantity field exists)")
 
     st.markdown("## Funnel")
     stages = A.get_macro_funnel_stages(con)
@@ -143,6 +157,7 @@ def page_overview():
     ))
     fig.update_layout(height=320, title="Session-level funnel: View → Cart → Purchase")
     st.plotly_chart(fig, use_container_width=True)
+    st.caption("Percentages shown are relative to the View stage (the funnel's initial stage) at every level.")
 
     col_a, col_b = st.columns([2, 1])
     with col_a:
@@ -186,6 +201,8 @@ def page_funnel():
     st.caption("🔎 Demo build: filter by ONE dimension at a time (no combined multi-filter "
                "or date range — that needs the full 69.8M-row local table). See the full "
                "local dashboard for the complete interactive filter set.")
+    st.caption("View → Cart and View → Purchase are both % of viewing sessions. "
+               "Cart → Purchase is % of carting sessions (a different, smaller denominator).")
 
     opts = A.get_filter_options(con)
     dim_label = st.radio("Filter by", ["Category", "Brand", "Price band"], horizontal=True)
@@ -201,10 +218,16 @@ def page_funnel():
         st.warning("No data matches this filter.")
         return
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Viewing sessions", f"{result['viewing_sessions']:,}")
-    c2.metric("View → Cart", f"{result['view_to_cart_pct']:.2f}%" if result['view_to_cart_pct'] is not None else "—")
-    c3.metric("Overall conversion", f"{result['overall_conversion_pct']:.2f}%" if result['overall_conversion_pct'] is not None else "—")
+    cart_to_purchase_pct = result.get("cart_to_purchase_pct")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Viewing sessions", fmt_compact(result['viewing_sessions']), help=f"{result['viewing_sessions']:,}")
+    c2.metric("View → Cart", f"{result['view_to_cart_pct']:.2f}%" if result['view_to_cart_pct'] is not None else "—",
+              help="Viewing sessions that also added this to cart, ÷ all viewing sessions")
+    c3.metric("Cart → Purchase", f"{cart_to_purchase_pct:.2f}%" if cart_to_purchase_pct is not None else "—",
+              help="Carting sessions that went on to purchase, ÷ all carting sessions")
+    c4.metric("View → Purchase", f"{result['overall_conversion_pct']:.2f}%" if result['overall_conversion_pct'] is not None else "—",
+              help="Viewing sessions that went on to purchase, ÷ all viewing sessions (overall conversion)")
 
     funnel_df = pd.DataFrame({
         "stage": ["Viewed", "Carted", "Purchased"],
@@ -237,14 +260,16 @@ def page_product_category():
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("### Top Products by Views")
-            top_views = A.get_top_products(con, by="views", n=15)
+            top_views = A.get_top_products(con, by="views", n=15).fillna(
+                {"category_code": "Unknown category", "brand": "Unknown brand"})
             st.dataframe(top_views[["product_id", "category_code", "brand", "view_events",
                                      "purchase_events", "overall_conversion_rate", "revenue"]],
                          use_container_width=True, hide_index=True,
                          column_config={"overall_conversion_rate": st.column_config.NumberColumn(format="percent")})
         with col2:
             st.markdown("### Top Products by Purchases")
-            top_purch = A.get_top_products(con, by="purchases", n=15)
+            top_purch = A.get_top_products(con, by="purchases", n=15).fillna(
+                {"category_code": "Unknown category", "brand": "Unknown brand"})
             st.dataframe(top_purch[["product_id", "category_code", "brand", "purchase_events",
                                      "overall_conversion_rate", "revenue"]],
                          use_container_width=True, hide_index=True,
@@ -252,7 +277,8 @@ def page_product_category():
 
         st.markdown("### Traffic vs. Conversion (bubble = revenue)")
         st.caption("Quadrants split at the dataset median for products with ≥50 viewing sessions.")
-        quad = cached_product_quadrants(min_sessions=50)
+        quad = cached_product_quadrants(min_sessions=50).fillna(
+            {"category_code": "Unknown category", "brand": "Unknown brand"})
         quad_colors = {"Star": CATEGORICAL[2], "High-traffic underperformer": STATUS["serious"],
                        "Hidden gem": CATEGORICAL[0], "Low priority": "#c3c2b7"}
         fig = px.scatter(
@@ -265,7 +291,8 @@ def page_product_category():
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("### High-Traffic / Low-Conversion Products")
-        ht_lc = cached_high_traffic_low_conv(n=20)
+        ht_lc = cached_high_traffic_low_conv(n=20).fillna(
+            {"category_code": "Unknown category", "brand": "Unknown brand"})
         st.dataframe(ht_lc, use_container_width=True, hide_index=True,
                      column_config={"overall_conversion_rate": st.column_config.NumberColumn(format="percent")})
 
@@ -325,6 +352,8 @@ def page_user_behavior():
 
     st.markdown("## Repeat Purchase Behavior")
     repeat = A.get_repeat_purchase_summary(con)
+    repeat["is_repeat_purchaser"] = repeat["is_repeat_purchaser"].map(
+        {True: "Repeat buyer", False: "One-time buyer"})
     c1, c2 = st.columns(2)
     with c1:
         fig = px.bar(repeat, x="is_repeat_purchaser", y="n_purchasers", color_discrete_sequence=[CATEGORICAL[0]])
