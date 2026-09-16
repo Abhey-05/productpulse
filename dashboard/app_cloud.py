@@ -111,6 +111,50 @@ def fmt_compact(n) -> str:
     return f"{n:,.0f}"
 
 
+# Friendly display names for raw column names in st.dataframe tables —
+# label/formatting only, never renames the underlying DataFrame columns
+# (chart code elsewhere still references the original column names).
+COLUMN_LABELS = {
+    "product_id": "Product ID", "category_code": "Category", "brand": "Brand",
+    "avg_price": "Avg. Price", "view_events": "View Events", "cart_events": "Cart Events",
+    "purchase_events": "Purchase Events", "viewing_sessions": "Viewing Sessions",
+    "carting_sessions": "Carting Sessions", "purchasing_sessions": "Purchasing Sessions",
+    "overall_conversion_rate": "Conversion Rate", "view_to_cart_rate": "View → Cart Conversion",
+    "cart_to_purchase_rate": "Cart → Purchase Conversion", "cart_abandonment_rate": "Cart Abandonment Rate",
+    "revenue": "Revenue", "n_products": "# Products", "pct_of_total_views": "% of Total Views",
+    "pct_of_total_revenue": "% of Total Revenue", "price_band": "Price Band",
+    "activity_segment": "Segment", "n_users": "# Users", "pct_of_users": "% of Users",
+    "avg_events": "Avg. Events", "avg_sessions": "Avg. Sessions", "total_revenue": "Total Revenue",
+}
+# 0-1 fraction columns (agg_*_metrics tables) — Streamlit's format="percent"
+# multiplies by 100 for display, so these must NOT already be pre-scaled.
+PERCENT_COLUMNS = {"overall_conversion_rate", "view_to_cart_rate", "cart_to_purchase_rate",
+                    "cart_abandonment_rate", "pct_of_total_views", "pct_of_total_revenue"}
+# Already scaled to 0-100 by their own SQL (ROUND(100.0 * ..., 2)) — needs a
+# literal "%" appended, NOT format="percent", or it would double-multiply
+# (e.g. 77.71 would render as "7771.00%").
+ALREADY_SCALED_PERCENT_COLUMNS = {"pct_of_users"}
+CURRENCY_COLUMNS = {"revenue", "total_revenue", "avg_price"}
+
+
+def col_cfg(columns):
+    """Build a column_config dict with friendly labels (+ percent/currency
+    formatting where applicable) for the given column names, for st.dataframe.
+    Presentation only — never touches the underlying data."""
+    cfg = {}
+    for c in columns:
+        label = COLUMN_LABELS.get(c, c)
+        if c in PERCENT_COLUMNS:
+            cfg[c] = st.column_config.NumberColumn(label, format="percent")
+        elif c in ALREADY_SCALED_PERCENT_COLUMNS:
+            cfg[c] = st.column_config.NumberColumn(label, format="%.2f%%")
+        elif c in CURRENCY_COLUMNS:
+            cfg[c] = st.column_config.NumberColumn(label, format="dollar")
+        else:
+            cfg[c] = st.column_config.Column(label)
+    return cfg
+
+
 def callout(label: str, title: str, body_html: str, tone: str = "default"):
     st.markdown(
         f"""<div class="pp-callout {tone}">
@@ -132,15 +176,23 @@ def page_overview():
                f"{kpis['total_sessions']:,} sessions")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Users", fmt_compact(kpis['total_users']), help=f"{kpis['total_users']:,}")
-    c2.metric("Total Sessions", fmt_compact(kpis['total_sessions']), help=f"{kpis['total_sessions']:,}")
-    c3.metric("Product Views", fmt_compact(kpis['total_views']), help=f"{kpis['total_views']:,}")
-    c4.metric("Cart Additions", fmt_compact(kpis['total_carts']), help=f"{kpis['total_carts']:,}")
+    c1.metric("Total Users", fmt_compact(kpis['total_users']),
+              help=f"{kpis['total_users']:,} distinct users, all time in this window")
+    c2.metric("Total Sessions", fmt_compact(kpis['total_sessions']),
+              help=f"{kpis['total_sessions']:,} distinct sessions, all time in this window")
+    c3.metric("Product View Events", fmt_compact(kpis['total_views']),
+              help=f"{kpis['total_views']:,} raw view events — a session viewing the same product "
+                   f"multiple times counts each time (see the funnel below for session-level counts)")
+    c4.metric("Cart-Add Events", fmt_compact(kpis['total_carts']),
+              help=f"{kpis['total_carts']:,} raw add-to-cart events (event count, not sessions)")
 
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Purchases", fmt_compact(kpis['total_purchases']), help=f"{kpis['total_purchases']:,}")
+    c5.metric("Purchase Events", fmt_compact(kpis['total_purchases']),
+              help=f"{kpis['total_purchases']:,} raw purchase events — a session buying multiple "
+                   f"products in one purchase logs one event per item (see the funnel below for "
+                   f"purchasing sessions, a different, smaller number)")
     c6.metric("Purchase Conversion", f"{kpis['session_overall_conversion_pct']:.2f}%",
-              help="Purchasing sessions / viewing sessions (session-level macro funnel)")
+              help="Purchasing sessions ÷ viewing sessions (session-level macro funnel, View → Purchase)")
     c7.metric("Cart Abandonment", f"{kpis['cart_abandonment_pct']:.1f}%",
               help="Carted a product, never purchased it (session-product level)")
     c8.metric("Revenue (proxy)", f"${fmt_compact(kpis['total_revenue'])}",
@@ -157,7 +209,15 @@ def page_overview():
     ))
     fig.update_layout(height=320, title="Session-level funnel: View → Cart → Purchase")
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Percentages shown are relative to the View stage (the funnel's initial stage) at every level.")
+    st.caption("Chart percentages are relative to the View stage (the funnel's first stage) at every level.")
+    fc1, fc2, fc3 = st.columns(3)
+    fc1.metric("View → Cart", f"{kpis['session_view_to_cart_pct']:.2f}%",
+               help="% of viewing sessions that also added a product to cart")
+    fc2.metric("Cart → Purchase", f"{kpis['session_cart_to_purchase_pct']:.2f}%",
+               help="% of carting sessions that went on to purchase (a different, smaller denominator "
+                    "than the two figures either side of it)")
+    fc3.metric("View → Purchase", f"{kpis['session_overall_conversion_pct']:.2f}%",
+               help="% of viewing sessions that went on to purchase (same as Purchase Conversion above)")
 
     col_a, col_b = st.columns([2, 1])
     with col_a:
@@ -220,6 +280,8 @@ def page_funnel():
 
     cart_to_purchase_pct = result.get("cart_to_purchase_pct")
 
+    st.caption(f"Metrics below are for **{dim_label}: {value}** only, not the whole dataset — "
+               f"that's why they're smaller than the Executive Overview totals.")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Viewing sessions", fmt_compact(result['viewing_sessions']), help=f"{result['viewing_sessions']:,}")
     c2.metric("View → Cart", f"{result['view_to_cart_pct']:.2f}%" if result['view_to_cart_pct'] is not None else "—",
@@ -262,21 +324,25 @@ def page_product_category():
             st.markdown("### Top Products by Views")
             top_views = A.get_top_products(con, by="views", n=15).fillna(
                 {"category_code": "Unknown category", "brand": "Unknown brand"})
-            st.dataframe(top_views[["product_id", "category_code", "brand", "view_events",
-                                     "purchase_events", "overall_conversion_rate", "revenue"]],
-                         use_container_width=True, hide_index=True,
-                         column_config={"overall_conversion_rate": st.column_config.NumberColumn(format="percent")})
+            cols = ["product_id", "category_code", "brand", "view_events",
+                    "purchase_events", "overall_conversion_rate", "revenue"]
+            st.dataframe(top_views[cols], use_container_width=True, hide_index=True,
+                         column_config=col_cfg(cols))
         with col2:
             st.markdown("### Top Products by Purchases")
             top_purch = A.get_top_products(con, by="purchases", n=15).fillna(
                 {"category_code": "Unknown category", "brand": "Unknown brand"})
-            st.dataframe(top_purch[["product_id", "category_code", "brand", "purchase_events",
-                                     "overall_conversion_rate", "revenue"]],
-                         use_container_width=True, hide_index=True,
-                         column_config={"overall_conversion_rate": st.column_config.NumberColumn(format="percent")})
+            cols = ["product_id", "category_code", "brand", "purchase_events",
+                    "overall_conversion_rate", "revenue"]
+            st.dataframe(top_purch[cols], use_container_width=True, hide_index=True,
+                         column_config=col_cfg(cols))
 
         st.markdown("### Traffic vs. Conversion (bubble = revenue)")
-        st.caption("Quadrants split at the dataset median for products with ≥50 viewing sessions.")
+        st.caption("Quadrants split at the dataset median viewing sessions and median conversion rate, "
+                   "for products with ≥50 viewing sessions: **Star** = above-median traffic and "
+                   "conversion · **High-traffic underperformer** = above-median traffic, below-median "
+                   "conversion · **Hidden gem** = below-median traffic, above-median conversion · "
+                   "**Low priority** = below-median on both.")
         quad = cached_product_quadrants(min_sessions=50).fillna(
             {"category_code": "Unknown category", "brand": "Unknown brand"})
         quad_colors = {"Star": CATEGORICAL[2], "High-traffic underperformer": STATUS["serious"],
@@ -284,6 +350,9 @@ def page_product_category():
         fig = px.scatter(
             quad, x="viewing_sessions", y="overall_conversion_rate", size="revenue", color="quadrant",
             color_discrete_map=quad_colors, hover_data=["product_id", "category_code", "brand"],
+            labels={"viewing_sessions": "Viewing Sessions", "overall_conversion_rate": "Conversion Rate",
+                    "product_id": "Product ID", "category_code": "Category", "brand": "Brand",
+                    "revenue": "Revenue", "quadrant": "Quadrant"},
             log_x=True,
         )
         fig.update_layout(height=480, xaxis_title="Viewing sessions (log scale)", yaxis_title="Overall conversion rate")
@@ -291,10 +360,10 @@ def page_product_category():
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("### High-Traffic / Low-Conversion Products")
+        st.caption("Top traffic quartile, bottom conversion quartile, ≥200 viewing sessions.")
         ht_lc = cached_high_traffic_low_conv(n=20).fillna(
             {"category_code": "Unknown category", "brand": "Unknown brand"})
-        st.dataframe(ht_lc, use_container_width=True, hide_index=True,
-                     column_config={"overall_conversion_rate": st.column_config.NumberColumn(format="percent")})
+        st.dataframe(ht_lc, use_container_width=True, hide_index=True, column_config=col_cfg(ht_lc.columns))
 
     with tab2:
         cats = A.get_category_metrics(con)
@@ -302,22 +371,17 @@ def page_product_category():
         fig = px.scatter(
             cats, x="view_events", y="overall_conversion_rate", size="revenue",
             hover_data=["category_code"], text="category_code",
+            labels={"view_events": "View Events", "overall_conversion_rate": "Conversion Rate",
+                    "category_code": "Category", "revenue": "Revenue"},
             color_discrete_sequence=[CATEGORICAL[0]], log_x=True,
         )
         fig.update_traces(textposition="top center", textfont=dict(size=9))
         fig.update_layout(height=520, xaxis_title="Views (log scale)", yaxis_title="Overall conversion rate")
         fig.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(
-            cats[["category_code", "n_products", "view_events", "purchase_events",
-                  "overall_conversion_rate", "revenue", "pct_of_total_views", "pct_of_total_revenue"]],
-            use_container_width=True, hide_index=True,
-            column_config={
-                "overall_conversion_rate": st.column_config.NumberColumn(format="percent"),
-                "pct_of_total_views": st.column_config.NumberColumn(format="percent"),
-                "pct_of_total_revenue": st.column_config.NumberColumn(format="percent"),
-            },
-        )
+        cat_cols = ["category_code", "n_products", "view_events", "purchase_events",
+                    "overall_conversion_rate", "revenue", "pct_of_total_views", "pct_of_total_revenue"]
+        st.dataframe(cats[cat_cols], use_container_width=True, hide_index=True, column_config=col_cfg(cat_cols))
 
     with tab3:
         st.markdown("### Brand Performance (top 30 by revenue)")
@@ -326,8 +390,7 @@ def page_product_category():
                      color_discrete_sequence=[CATEGORICAL[0]])
         fig.update_layout(height=560, xaxis_title="Revenue ($)", yaxis_title="")
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(brands, use_container_width=True, hide_index=True,
-                     column_config={"overall_conversion_rate": st.column_config.NumberColumn(format="percent")})
+        st.dataframe(brands, use_container_width=True, hide_index=True, column_config=col_cfg(brands.columns))
 
 
 # =======================================================================
@@ -348,7 +411,7 @@ def page_user_behavior():
                      orientation="h", color_discrete_sequence=[CATEGORICAL[0]])
         fig.update_layout(height=360, title="Revenue by segment", xaxis_title="Revenue ($)", yaxis_title="")
         st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(segments, use_container_width=True, hide_index=True)
+    st.dataframe(segments, use_container_width=True, hide_index=True, column_config=col_cfg(segments.columns))
 
     st.markdown("## Repeat Purchase Behavior")
     repeat = A.get_repeat_purchase_summary(con)
@@ -388,25 +451,19 @@ def page_price():
     c1, c2 = st.columns(2)
     with c1:
         fig = px.bar(bands, x="price_band", y="overall_conversion_rate", color_discrete_sequence=[CATEGORICAL[0]])
-        fig.update_layout(height=380, title="Overall conversion by price band", yaxis_tickformat=".1%")
+        fig.update_layout(height=380, title="Overall conversion by price band", yaxis_tickformat=".1%",
+                           xaxis_title="Price Band", yaxis_title="Overall Conversion Rate")
         st.plotly_chart(fig, use_container_width=True)
     with c2:
         fig = px.bar(bands, x="price_band", y="cart_abandonment_rate", color_discrete_sequence=[STATUS["serious"]])
-        fig.update_layout(height=380, title="Cart abandonment by price band", yaxis_tickformat=".1%")
+        fig.update_layout(height=380, title="Cart abandonment by price band", yaxis_tickformat=".1%",
+                           xaxis_title="Price Band", yaxis_title="Cart Abandonment Rate")
         st.plotly_chart(fig, use_container_width=True)
 
-    st.dataframe(
-        bands[["price_band", "n_products", "view_events", "cart_events", "purchase_events",
-               "view_to_cart_rate", "cart_to_purchase_rate", "overall_conversion_rate",
-               "cart_abandonment_rate", "revenue"]],
-        use_container_width=True, hide_index=True,
-        column_config={
-            "view_to_cart_rate": st.column_config.NumberColumn(format="percent"),
-            "cart_to_purchase_rate": st.column_config.NumberColumn(format="percent"),
-            "overall_conversion_rate": st.column_config.NumberColumn(format="percent"),
-            "cart_abandonment_rate": st.column_config.NumberColumn(format="percent"),
-        },
-    )
+    price_cols = ["price_band", "n_products", "view_events", "cart_events", "purchase_events",
+                  "view_to_cart_rate", "cart_to_purchase_rate", "overall_conversion_rate",
+                  "cart_abandonment_rate", "revenue"]
+    st.dataframe(bands[price_cols], use_container_width=True, hide_index=True, column_config=col_cfg(price_cols))
 
     st.markdown("## Drill Down: Price Conversion Within a Category")
     opts = A.get_filter_options(con)
@@ -436,7 +493,7 @@ def page_insights():
     n = 1
     for _, row in ht_cats.iterrows():
         callout(
-            f"Insight {n:02d}", "High traffic, low conversion",
+            f"Insight {n:02d}", f"High traffic, low conversion — {row['category_code']}",
             f"Category <b>{row['category_code']}</b> generates <b>{row['pct_of_total_views']:.1f}%</b> of "
             f"all product views but only <b>{row['pct_of_total_revenue']:.1f}%</b> of revenue "
             f"(overall conversion {row['overall_conversion_pct']:.2f}%).<br><br>"
@@ -452,7 +509,7 @@ def page_insights():
 
     for _, row in abandon_cats.iterrows():
         callout(
-            f"Insight {n:02d}", "High cart abandonment",
+            f"Insight {n:02d}", f"High cart abandonment — {row['category_code']}",
             f"Category <b>{row['category_code']}</b> has a <b>{row['cart_abandonment_pct']:.1f}%</b> cart "
             f"abandonment rate across {row['carting_session_products']:,} cart adds.<br><br>"
             f"<b>Possible interpretation:</b> users reach purchase intent (adding to cart) but do not "
